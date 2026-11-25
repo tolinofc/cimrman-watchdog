@@ -1,0 +1,66 @@
+name: Cimrman watchdog
+
+# Hlídá zpětně uvolněná místa v Žižkovském divadle Járy Cimrmana a hlásí je do Telegramu.
+#
+# Každý běh drží smyčku ~55 minut a kontroluje každých 15 s. Cron se spouští
+# každou čtvrthodinu: když předchozí běh ještě jede, nový čeká ve frontě
+# (GitHub drží jen jeden čekající), takže hned po skončení navazuje další běh
+# a hlídání je prakticky nepřetržité.
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_telegram:
+        description: "Jen poslat zkušební zprávu do Telegramu"
+        type: boolean
+        default: false
+
+concurrency:
+  group: cimrman-watchdog
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      # TITLE_FILTER: "záskok,severního pólu"   # jen vybrané hry (čárkou oddělené podřetězce)
+      # MIN_SEATS: "2"                          # hlásit až od N uvolněných míst najednou
+      # NOTIFY_SALE_START: "1"                  # hlásit i plánované spuštění prodeje
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Zkušební zpráva
+        if: inputs.test_telegram
+        run: python3 watch.py --test-telegram
+
+      - name: Hlídat uvolněná místa
+        if: ${{ !inputs.test_telegram }}
+        run: python3 watch.py --state state/seats.json --interval 15 --duration 3300
+
+      - name: Uložit stav zpátky do repa
+        if: ${{ !inputs.test_telegram && !cancelled() }}
+        run: |
+          if git diff --quiet -- state/seats.json && git ls-files --error-unmatch state/seats.json >/dev/null 2>&1; then
+            echo "Stav beze změny."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/seats.json
+          git commit -m "Aktualizace stavu sedadel ($(date -u '+%Y-%m-%d %H:%M UTC'))"
+          for i in 1 2 3; do
+            git pull --rebase --quiet origin "${GITHUB_REF_NAME}" && git push && exit 0
+            sleep 5
+          done
+          echo "::error::Push stavu se nepovedl."
+          exit 1
